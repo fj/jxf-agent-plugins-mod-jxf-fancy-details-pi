@@ -1,6 +1,6 @@
 {
   "name": "mod-jxf-fancy-details",
-  "version": "0.3.20261006024144",
+  "version": "0.3.20261006033055",
   "description": "Prompt and tool timers, per-reply usage prefixes and a usage footer.",
   "author": {
     "name": "John Feminella"
