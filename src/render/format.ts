@@ -42,6 +42,19 @@ export function formatUsd(cost: Cost): string {
   return `$${cost.usd.toFixed(CENTS_DIGITS)}${cost.isLowerBound ? '+' : ''}`
 }
 
+const withoutTrailingSlash = (path: string) => (path.length > 1 ? path.replace(/\/+$/, '') : path)
+
+export function isHomeOrAncestor(path: string, home: string): boolean {
+  if (home === '') {
+    return false
+  }
+
+  const dir = withoutTrailingSlash(path)
+  const homeDir = withoutTrailingSlash(home)
+
+  return dir === homeDir || dir === '/' || homeDir.startsWith(`${dir}/`)
+}
+
 export function shortenPath(path: string, home: string, maxWidth: number): string {
   const tilde = home !== '' && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path
 
@@ -58,4 +71,16 @@ export function shortenPath(path: string, home: string, maxWidth: number): strin
   }
 
   return `${head}/…/${tail.join('/')}`
+}
+
+export function formatRemaining(ms: number): string {
+  const totalSeconds = Math.ceil(Math.max(0, ms) / MS_PER_SECOND)
+  const minutes = Math.floor(totalSeconds / SECONDS_PER_MINUTE)
+  const seconds = totalSeconds % SECONDS_PER_MINUTE
+
+  return minutes > 0 ? `${minutes}m ${pad(seconds)}s` : `${seconds}s`
+}
+
+export function modelLabel(...parts: readonly string[]): string {
+  return parts.filter(part => part !== '').join('/')
 }

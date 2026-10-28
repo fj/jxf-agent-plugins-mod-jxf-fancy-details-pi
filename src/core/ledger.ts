@@ -2,7 +2,7 @@ import type { Cost } from './cost.ts'
 import { addTotals, ZERO_TOTALS, type Totals } from './totals.ts'
 import type { TokenUsage } from './usage.ts'
 import { ZERO_COST } from './cost.ts'
-import { ZERO_USAGE } from './usage.ts'
+import { totalInput, ZERO_USAGE } from './usage.ts'
 
 export type Pricer = (model: string, usage: TokenUsage) => Cost
 
@@ -39,6 +39,7 @@ export type LedgerState = {
   marks: Readonly<Record<string, Mark>>
   currentPromptId?: string
   currentStepId?: string
+  cachedAt?: number
   totals: Totals
 }
 
@@ -91,6 +92,8 @@ export function endMark(state: LedgerState, id: string, at: number): LedgerState
   return mark === undefined ? state : { ...state, marks: { ...state.marks, [id]: { ...mark, endedAt: at } } }
 }
 
+const usesCache = (usage: TokenUsage) => usage.cacheRead + usage.cacheWrite > 0
+
 export function completeStep(
   state: LedgerState,
   id: string,
@@ -107,22 +110,41 @@ export function completeStep(
   const cost = price(step.model, usage)
   const totals = addTotals(state.totals, { usage, cost, activeMs: 0 })
   const done: Step = { ...step, endedAt: at, usage, cost, totals }
+  const next = { ...state, totals, steps: { ...state.steps, [id]: done } }
 
-  return { ...state, totals, steps: { ...state.steps, [id]: done } }
+  return usesCache(usage) ? { ...next, cachedAt: Math.max(state.cachedAt ?? step.startedAt, step.startedAt) } : next
+}
+
+function closeStep(state: LedgerState, id: string, at: number): LedgerState {
+  const step = state.steps[id]
+
+  return step === undefined ? state : { ...state, steps: { ...state.steps, [id]: { ...step, endedAt: at } } }
 }
 
 export function finishStep(
   state: LedgerState,
   id: string,
-  usage: TokenUsage,
+  usage: TokenUsage | undefined,
   at: number,
   price: Pricer,
 ): LedgerState {
   const isOpenMessage = (mark: Mark) => mark.stepId === id && mark.kind === 'message' && mark.endedAt === undefined
   const open = Object.values(state.marks).filter(isOpenMessage)
-  const done = open.reduce((next, mark) => endMark(next, mark.id, at), completeStep(state, id, usage, at, price))
+  const closed = usage === undefined ? closeStep(state, id, at) : completeStep(state, id, usage, at, price)
+  const done = open.reduce((next, mark) => endMark(next, mark.id, at), closed)
 
   return markReply(done, at)
+}
+
+export function addAgentStep(
+  state: LedgerState,
+  model: string,
+  usage: TokenUsage,
+  price: Pricer,
+): { state: LedgerState; delta: Totals } {
+  const delta: Totals = { usage, cost: price(model, usage), activeMs: 0 }
+
+  return { state: { ...state, totals: addTotals(state.totals, delta) }, delta }
 }
 
 export function completeTurn(state: LedgerState, at: number): { state: LedgerState; delta: Totals } {
@@ -146,4 +168,16 @@ export function isStreaming(state: LedgerState, step: Step | undefined): step is
   return (
     step !== undefined && step.endedAt === undefined && step.id === state.currentStepId && state.currentPromptId !== undefined
   )
+}
+
+export function lastContextTokens(state: LedgerState): number {
+  let last: Step | undefined
+
+  for (const step of Object.values(state.steps)) {
+    if (step.usage !== undefined && (step.endedAt ?? 0) >= (last?.endedAt ?? 0)) {
+      last = step
+    }
+  }
+
+  return last?.usage === undefined ? 0 : totalInput(last.usage)
 }

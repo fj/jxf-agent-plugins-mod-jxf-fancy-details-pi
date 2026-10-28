@@ -5,12 +5,15 @@ export type Role =
   | 'label'
   | 'input'
   | 'cache'
+  | 'cacheCountdown'
   | 'output'
   | 'cost'
   | 'model'
   | 'path'
   | 'branch'
   | 'meter'
+  | 'overage'
+  | 'warning'
 
 export type Segment = { text: string; role: Role }
 
