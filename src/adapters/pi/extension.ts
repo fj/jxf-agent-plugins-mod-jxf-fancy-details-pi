@@ -3,12 +3,16 @@ import type { ContextUsage, ExtensionAPI, ExtensionContext } from '@earendil-wor
 import { footerLayout, subscriptionName, tokenDisplay, type FancyConfig, type ModelInfo } from '../../config/config.ts'
 import { cacheRemainingMs } from '../../core/cache.ts'
 import type { DailyStore } from '../../core/daily.ts'
+import { readGit, SHOW_STATUS } from '../../core/git-status.ts'
+import { latestRun } from '../../core/latest.ts'
 import { isJournalRecord, type JournalRecord } from '../../core/journal.ts'
 import type { QuotaReading } from '../../core/quota.ts'
 import { sessionTracker, type SessionTracker } from '../../core/tracker.ts'
 import type { TokenUsage } from '../../core/usage.ts'
 import type { ContextFill } from '../../render/context.ts'
 import { modelLabel } from '../../render/format.ts'
+import { gitStatusText } from '../../render/git-status.ts'
+import { pulseClock } from '../../render/pulse.ts'
 import { subscriptionStrategy, type SubscriptionStrategy } from '../../strategies/subscription/index.ts'
 import { usageStrategy, type UsageStrategy } from '../../strategies/usage/index.ts'
 import { cacheTtlMs, type Env } from './cache.ts'
@@ -26,7 +30,8 @@ export const PERSIST_POLL_MS = 5
 export const MAX_PERSIST_POLLS = 40
 
 const SESSION_KEY_PREFIX = 'pi-'
-const TODAY_REFRESH_MS = 30_000
+const POLL_MS = 30_000
+const GIT_TIMEOUT_MS = 2000
 
 export type FancyDeps = {
   measure: TextWidth
@@ -80,11 +85,14 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
     let pendingPrompt: { record: JournalRecord; message: unknown; polls: number } | undefined
     let unpatchToolRows: (() => void) | undefined
     let openStepId: string | undefined
+    let gitStatus: string | undefined
+    const gitRuns = latestRun()
     let tracker: SessionTracker = sessionTracker({ store: deps.store, sessionKey: SESSION_KEY_PREFIX, price: usage.price })
 
     const isUsingOverage = () => reading?.isUsingOverage ?? false
     const pulse = ticker(FRAME_MS, () => tui?.requestRender())
     const countdown = ticker(COUNTDOWN_MS, () => tui?.requestRender())
+    let pulseElapsed = pulseClock()
 
     const scene: FooterScene = {
       ledger: () => tracker.ledger(),
@@ -95,12 +103,14 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
       model: () => (model === undefined ? 'no model' : modelLabel(model.provider, model.id)),
       effort: () => (model?.reasoning === true ? pi.getThinkingLevel() : undefined),
       cwd: () => ctx?.cwd ?? '',
+      gitStatus: () => gitStatus,
       home: deps.home,
       today: () => tracker.today(now()),
       quota: () => (reading === null ? [] : subscription.render(reading)),
       context: () => contextFill(ctx?.getContextUsage()),
       cacheRemainingMs: () => cacheRemainingMs(tracker.ledger().cachedAt, cacheTtlMs(model, env, isUsingOverage()), now()),
       layout: () => footerLayout(config),
+      pulseElapsedMs: () => pulseElapsed(ctx?.cwd ?? '', now()),
       showPulse: isPulsing => (isPulsing ? pulse.start() : pulse.stop()),
       showCountdown: isCounting => (isCounting ? countdown.start() : countdown.stop()),
     }
@@ -113,11 +123,32 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
       }
     })
 
-    const refresher = ticker(TODAY_REFRESH_MS, () => void refreshOthers())
+    const refresher = ticker(POLL_MS, () => void refreshPolled())
 
     async function refreshOthers() {
       await tracker.refreshOthers(now())
       tui?.requestRender()
+    }
+
+    async function refreshGitStatus() {
+      if (ctx?.mode !== 'tui') {
+        return
+      }
+
+      const [command, ...args] = SHOW_STATUS
+      const reading = pi
+        .exec(command!, args, { cwd: ctx.cwd, timeout: GIT_TIMEOUT_MS })
+        .then(({ code, stdout }) => readGit({ exitCode: code, stdout }).status)
+        .catch(() => null)
+
+      await gitRuns(reading, status => {
+        gitStatus = status === null ? undefined : gitStatusText(status)
+        tui?.requestRender()
+      })
+    }
+
+    async function refreshPolled() {
+      await Promise.all([refreshOthers(), refreshGitStatus()])
     }
 
     function chooseStrategies() {
@@ -213,6 +244,7 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
 
     pi.on('session_start', async (_event, context) => {
       ctx = context
+      pulseElapsed = pulseClock()
       config = loadConfig(deps.configPath)
       model = context.model
       chooseStrategies()
@@ -225,7 +257,7 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
 
       if (context.mode === 'tui') {
         showUi(context)
-        await refreshOthers()
+        await refreshPolled()
       }
     })
 
@@ -290,6 +322,7 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
     pi.on('tool_execution_end', async event => {
       if (!isNestedCall(event)) {
         record({ kind: 'toolEnd', id: event.toolCallId, at: now() })
+        void refreshGitStatus()
       }
     })
 
@@ -306,7 +339,7 @@ export function modJxfFancyDetails(deps: FancyDeps): (pi: ExtensionAPI) => void 
       }
 
       tui?.requestRender()
-      await refreshOthers()
+      await refreshPolled()
     })
 
     pi.on('session_shutdown', async () => {
